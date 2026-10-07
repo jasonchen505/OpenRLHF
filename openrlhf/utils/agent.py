@@ -1,6 +1,7 @@
 import asyncio
 from abc import ABC, abstractmethod
 from copy import deepcopy
+from itertools import cycle
 
 import aiohttp
 
@@ -80,6 +81,7 @@ class MultiTurnAgentExecutor(AgentExecutorBase):
         total_reward = 0
         final_scores = 0
         extra_logs = {}
+        is_truncated = False
 
         if sampling_params.logprobs is not None:
             rollout_log_probs = [0.0] * len(current_obs_tokens)
@@ -101,6 +103,7 @@ class MultiTurnAgentExecutor(AgentExecutorBase):
             )
             action_tokens = request_output.outputs[0].token_ids
             action_text = request_output.outputs[0].text
+            is_truncated = request_output.outputs[0].finish_reason == "length"
 
             # Record action range in token space
             action_start = len(current_obs_tokens)
@@ -176,6 +179,7 @@ class MultiTurnAgentExecutor(AgentExecutorBase):
             "observation_tokens": current_obs_tokens,
             "action_ranges": action_ranges,
             "rollout_log_probs": rollout_log_probs,
+            "truncated": is_truncated,
             "extra_logs": extra_logs,
         }
         return final_response
@@ -187,6 +191,7 @@ class SingleTurnAgentExecutor(AgentExecutorBase):
     def __init__(self, remote_rm_url=None):
         reward_endpoints = [remote_rm_url] if isinstance(remote_rm_url, str) else remote_rm_url
         self.reward_endpoints = reward_endpoints or []
+        self._reward_endpoint_cycle = cycle(self.reward_endpoints)
 
         # Optional user-provided reward_func from a Python file.
         self.reward_func = None
@@ -326,8 +331,12 @@ class SingleTurnAgentExecutor(AgentExecutorBase):
         timeout = aiohttp.ClientTimeout(total=180)
 
         tasks = []
-        for i, rm in enumerate(self.reward_endpoints):
+        for i in range(num_servers):
             start_idx = i * batch_size
+            if start_idx >= len(queries_list):
+                break
+            # Rollouts usually send one query, so rotate across calls as well as shards.
+            rm = next(self._reward_endpoint_cycle)
             end_idx = min((i + 1) * batch_size, len(queries_list))
             payload = {
                 "query": queries_list[start_idx:end_idx],

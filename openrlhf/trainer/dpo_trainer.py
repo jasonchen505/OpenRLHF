@@ -261,7 +261,7 @@ class DPOTrainer(ABC):
             )
             acc_sum = 0
             loss_sum = 0
-            times = 0
+            num_samples = 0
             device = next(self.model.parameters()).device
             for data in eval_dataloader:
                 chosen_ids, c_mask, reject_ids, r_mask, prompt_id_lens = data
@@ -281,14 +281,15 @@ class DPOTrainer(ABC):
                 loss, chosen_reward, reject_reward = self.loss_fn(
                     chosen_logps, rejected_logps, reference_chosen_logps, reference_rejected_logps
                 )
-                acc_sum += (chosen_reward > reject_reward).float().mean().item()
-                loss_sum += loss.item()
-                times += 1
+                batch_size = chosen_reward.numel()
+                acc_sum += (chosen_reward > reject_reward).sum().item()
+                loss_sum += loss.item() * batch_size
+                num_samples += batch_size
                 step_bar.update()
 
             logs = {
-                "eval_loss": loss_sum / times,
-                "acc_mean": acc_sum / times,
+                "eval_loss": loss_sum / num_samples,
+                "acc_mean": acc_sum / num_samples,
             }
             logs = self.strategy.all_reduce(logs)
             step_bar.set_postfix(logs)
@@ -319,9 +320,7 @@ class DPOTrainer(ABC):
             ring_attn_group=self.strategy.ring_attn_group,
         )
 
-        all_logps_sum, all_logps_mean = self._get_batch_logps(
-            log_probs, att_masks, prompt_id_lens, average_log_prob=False
-        )
+        all_logps_sum, all_logps_mean = self._get_batch_logps(log_probs, att_masks, prompt_id_lens)
         chosen_logps = all_logps_sum[: chosen_ids.shape[0]]
         rejected_logps = all_logps_sum[chosen_ids.shape[0] :]
         aux_loss = output.aux_loss if "aux_loss" in output else []
@@ -364,19 +363,15 @@ class DPOTrainer(ABC):
         per_token_logps: torch.FloatTensor,
         attention_mask,
         prompt_id_lens,
-        average_log_prob: bool = False,
     ) -> torch.FloatTensor:
-        """Compute the log probabilities of the given labels under the given logits.
+        """Compute the summed and averaged log probabilities of the given labels under the given logits.
 
         Args:
             per_token_logps: Per token log probabilities. Shape: (batch_size, sequence_length)
-            average_log_prob: If True, return the average log probability per (non-masked) token. Otherwise, return the sum of the log probabilities of the (non-masked) tokens.
 
         Returns:
-            A tensor of shape (batch_size,) containing the average/sum log probabilities of the given labels under the given logits.
+            (sum, mean) tensors of shape (batch_size,) over the non-masked tokens.
         """
-        assert average_log_prob == False
-
         loss_masks = attention_mask.clone().bool()
         # mask prompts
         for mask, source_len in zip(loss_masks, prompt_id_lens):

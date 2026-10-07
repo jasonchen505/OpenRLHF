@@ -53,6 +53,7 @@ OpenRLHFは、**Ray + vLLM分散アーキテクチャ**と**統一エージェ�
 <details>
 <summary>ニュースを表示</summary>
 
+- [2026/9] OpenRLHF が [FlashREINFORCE](https://www.researchgate.net/publication/414274571_FlashREINFORCE_FLASHREINFORCE_CRITIC-FREE_SINGLE-ROLLOUT_ASYNCHRONOUS_RL_FOR_AGENTIC_LANGUAGE_MODELS) をサポート — エージェント LLM 向けの critic なし・単一ロールアウト非同期 RL。設定の組み合わせだけで実現（`--algo.advantage.estimator flash_reinforce`、vLLM logprob に対する binary-KL 信頼領域、サンプル平均集約）。学習スクリプト：[train_flash_reinforce_ray_agent_async.sh](./examples/scripts/train_flash_reinforce_ray_agent_async.sh)
 - [2026/2] [ProRL V2](https://developer.nvidia.com/blog/scaling-llm-reinforcement-learning-with-prolonged-training-using-prorl-v2/) がREINFORCE++-baselineを使用して長期RL学習で最先端の1.5B推論モデルを学習。学習スクリプト：[train_prorlv2_math_hybrid_engine.sh](./examples/scripts/train_prorlv2_math_hybrid_engine.sh)
 - [2025/10] [ScaleRL](https://arxiv.org/abs/2510.13786) が大規模学習シナリオにおけるREINFORCE++-baselineの有効性を検証。[REINFORCE++スライド](https://docs.google.com/presentation/d/1stieP_3PM1z4Hq1YWR3GywFkxcHEAlstXMaS23KlGN4)をリリース
 - [2025/6] [Magistral](https://mistral.ai/static/research/magistral.pdf) がREINFORCE++-baselineと非常に類似した手法を用いて推論モデルを学習。
@@ -186,6 +187,7 @@ OpenRLHFは、実践ガイドとコミュニティのベストプラクティス
 | **RLOO** | `rloo` | トークンごとのKL + PPO-clip | マルチサンプル学習 |
 | **GRPO** | `group_norm` | グループ正規化 | バッチベースの学習 |
 | **Dr. GRPO** | `dr_grpo` | 簡略化されたGRPO | ローカル`/std`正規化の削除 |
+| **FlashREINFORCE** | `flash_reinforce` | critic なしの単一ロールアウト RL：バッチ平均ベースライン + vLLM logprob に対する binary-KL 信頼領域 | プロンプトごとに 1 ロールアウトの非同期エージェント RL（[スクリプト](examples/scripts/train_flash_reinforce_ray_agent_async.sh)） |
 
 </details>
 
@@ -244,7 +246,7 @@ OpenRLHFは、エージェントベースの柔軟性を備えた完全なRLHF�
 **効率の最適化**
 - すべての学習モードでのサンプルパッキング（`--ds.packing_samples`）
 - 高速生成のためのvLLM加速（`--vllm.num_engines`）
-- TIS（vLLM 重要度サンプリング補正）/ ICEPOP：`--algo.advantage.is_correction_enable`、`--algo.advantage.is_correction_threshold 0.5 5.0`、`--use_icepop`（PPO のみ）
+- TIS（vLLM 重要度サンプリング補正）/ ICEPOP：`--algo.advantage.is_correction_level token`、`--algo.advantage.is_correction_mode clip|mask`、`--algo.advantage.is_correction_threshold 0.5 5.0`（PPO のみ）
 - DAPO [動的フィルタリング](./examples/scripts/train_dapo_ray_hybrid_engine.sh)（`--algo.dynamic_filtering_enable`）
   - 🎲 Dynamic Sampling：各プロンプトに対して複数の応答を生成し、報酬関数/エージェントが返す **0–1 `scores`** に基づいてフィルタリング
     - 有効化：`--algo.dynamic_filtering_enable`
@@ -293,7 +295,7 @@ sudo pip uninstall xgboost transformer_engine flash_attn pynvml -y
 
 # 3. OpenRLHFをインストール（1つ選択）
 pip install openrlhf                    # 基本
-pip install openrlhf[vllm]              # + vLLM 0.22.1（推奨）
+pip install openrlhf[vllm]              # + vLLM 0.29.0（推奨）
 pip install openrlhf[vllm_latest]       # + 最新vLLM
 pip install openrlhf[vllm,ring,liger]   # + すべての最適化
 ```
@@ -307,7 +309,7 @@ pip install -e .
 ```
 
 > [!TIP]
-> 最高のパフォーマンスのために**vLLM 0.22.1+**を推奨します。[Dockerfiles](./dockerfile/)と[Nvidia-Dockerインストールスクリプト](./examples/scripts/nvidia_docker_install.sh)を参照してください。
+> 最高のパフォーマンスのために**vLLM 0.29.0+**を推奨します。[Dockerfiles](./dockerfile/)と[Nvidia-Dockerインストールスクリプト](./examples/scripts/nvidia_docker_install.sh)を参照してください。
 
 詳細な使用方法、データセット準備、学習例については、英語版READMEの該当セクションを参照してください。
 

@@ -28,7 +28,7 @@ def train(args):
         lora_alpha=args.ds.lora.alpha,
         target_modules=args.ds.lora.target_modules,
         lora_dropout=args.ds.lora.dropout,
-        ds_config=strategy.get_ds_train_config(is_actor=False),
+        ds_config=strategy.get_ds_train_config(),
         init_value_head=True,
         value_head_prefix=args.ds.value_head_prefix,
         packing_samples=args.ds.packing_samples,
@@ -94,6 +94,7 @@ def train(args):
         True,
         False,
         eval_dataset.collate_fn,
+        drop_last=False,
         num_workers=args.data.dataloader_num_workers,
     )
 

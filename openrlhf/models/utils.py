@@ -1,3 +1,4 @@
+import os
 from typing import Optional, Tuple, Union
 
 import deepspeed
@@ -6,7 +7,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 
-def set_z3_leaf_modules(model: nn.Module) -> None:
+def set_z3_leaf_modules(model: nn.Module, detect_hybrid: bool = True) -> None:
     """Auto-detect and set DeepSpeed ZeRO3 leaf modules.
 
     ZeRO3 prefetches submodule parameters assuming a fixed module traversal order.
@@ -17,8 +18,22 @@ def set_z3_leaf_modules(model: nn.Module) -> None:
         child submodules per instance (self_attn vs linear_attn).
 
     Marking these as z3 leaves forces whole-module allgather instead of per-submodule
-    prefetch, fixing the issue at the cost of slightly higher peak memory.
+    prefetch, at the cost of slightly higher peak memory.
+
+    For hybrid architectures (detect_hybrid=True), the leaf marking works by
+    registering a backwards hook that triggers allgather before backward. This
+    interacts poorly with Qwen3.5's hybrid decoder layers: the hook steals
+    gradient computation for ~390/417 inner parameters, leaving them frozen at
+    their initial values. DeepSpeed's native per-instance prefetch handles the
+    hybrid layout correctly on its own, so hybrid detection is disabled by
+    default for actor/reward model training.
+
+    Set OPENRLHF_Z3_LEAF_HYBRID=1 to re-enable hybrid detection for
+    architectures that genuinely need it.
     """
+    if os.environ.get("OPENRLHF_Z3_LEAF_HYBRID", "").strip().lower() in ("1", "true", "yes", "on"):
+        detect_hybrid = True
+
     z3_leaf_classes = set()
     child_sigs: dict[type, frozenset[str]] = {}
 
@@ -29,15 +44,16 @@ def set_z3_leaf_modules(model: nn.Module) -> None:
             continue
 
         # Hybrid: same class, different child submodules across instances
-        cls = m.__class__
-        children = frozenset(name for name, _ in m.named_children())
-        if not children:
-            continue
-        if cls in child_sigs:
-            if child_sigs[cls] != children:
-                z3_leaf_classes.add(cls)
-        else:
-            child_sigs[cls] = children
+        if detect_hybrid:
+            cls = m.__class__
+            children = frozenset(name for name, _ in m.named_children())
+            if not children:
+                continue
+            if cls in child_sigs:
+                if child_sigs[cls] != children:
+                    z3_leaf_classes.add(cls)
+            else:
+                child_sigs[cls] = children
 
     if z3_leaf_classes:
         deepspeed.utils.set_z3_leaf_modules(model, list(z3_leaf_classes))
@@ -45,38 +61,71 @@ def set_z3_leaf_modules(model: nn.Module) -> None:
             print(f"Setting zero3 leaf: {cls.__name__}")
 
 
+# Upper bound for the importance weight w = π_θ/π_θ_old used by the unbiased-gradient KL
+# correction. IS weights are unbounded and explode off-policy, so we clamp for stability.
+KL_IS_WEIGHT_CLIP = 10.0
+
+
 def compute_approx_kl(
     log_probs: torch.Tensor,
     log_probs_base: torch.Tensor,
+    log_probs_old: Optional[torch.Tensor] = None,
     kl_estimator: str = "k1",
+    unbiased_gradient: bool = False,
 ) -> torch.Tensor:
     """
     Compute the approximate KL divergence between two distributions.
     Schulman blog: http://joschu.net/blog/kl-approx.html
 
     Args:
-        log_probs: Log probabilities of the new distribution.
-        log_probs_base: Log probabilities of the base distribution.
+        log_probs: Log probabilities of the new (current) policy π_θ.
+        log_probs_base: Log probabilities of the reference policy π_ref.
+        log_probs_old: Log probabilities of the rollout policy π_θ_old. Only used when
+            unbiased_gradient=True, to importance-weight the off-policy KL-loss gradient.
+        kl_estimator: k1 / k2 / k3 (Schulman). Selects the forward value.
+        unbiased_gradient: If True, keep the chosen estimator's forward value but backprop the
+            true reverse-KL gradient E_{y~π_θ_old}[w · k1 · ∇log π_θ] via a straight-through trick,
+            with w = π_θ/π_θ_old (clamped, detached). k1/k2/k3 then share the same (correct)
+            gradient and differ only in value/variance. If False, behaves exactly as the legacy
+            estimator (gradient flows through the estimator formula unchanged).
     """
 
     log_ratio = log_probs.float() - log_probs_base.float()
 
     if kl_estimator == "k1":
-        pass  # log_ratio is already p - q
+        value = log_ratio  # log_ratio is already p - q
     elif kl_estimator == "k2":
         # Non-negative KL approximation: (p - q)^2 / 2
         # http://joschu.net/blog/kl-approx.html
         # Approximately equivalent to one-step KL penalty with k1
         # used in https://arxiv.org/pdf/2310.10505.
-        log_ratio = log_ratio**2 / 2.0
+        value = log_ratio**2 / 2.0
     elif kl_estimator == "k3":
         # Non-negative KL approximation: exp(q - p) - 1 - (q - p)
         # http://joschu.net/blog/kl-approx.html
-        log_ratio = (-log_ratio).exp() - 1 + log_ratio
+        # Below -10, k3 already exceeds the final cap. Bound before exp to
+        # avoid an overflowing derivative (0 * inf) after the final clamp.
+        k3_log_ratio = log_ratio.clamp(min=-10)
+        value = (-k3_log_ratio).exp() - 1 + k3_log_ratio
     else:
         raise ValueError(f"Unknown kl_estimator: {kl_estimator}")
 
-    return log_ratio.clamp(min=-10, max=10)
+    value = value.clamp(min=-10, max=10)
+
+    if not unbiased_gradient:
+        return value
+
+    # Unbiased, importance-sampling-corrected reverse-KL gradient. k2's pathwise gradient
+    # reproduces the score-function form ℓ·∇log π_θ = k1·∇log π_θ; multiplying by the detached
+    # IS weight w gives the off-policy estimator E_{y~π_θ_old}[w · k1 · ∇log π_θ] = ∇_θ D_KL(π_θ‖π_ref).
+    if log_probs_old is None:
+        w = 1.0
+    else:
+        w = (log_probs.float() - log_probs_old.float()).exp().clamp(max=KL_IS_WEIGHT_CLIP).detach()
+    grad_surrogate = w * (log_ratio**2 / 2.0)
+
+    # Straight-through: forward value = chosen estimator, backward gradient = ∇grad_surrogate.
+    return value.detach() + grad_surrogate - grad_surrogate.detach()
 
 
 def compute_reward(

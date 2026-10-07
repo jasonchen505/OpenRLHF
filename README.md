@@ -32,6 +32,8 @@ OpenRLHF is **the first** high-performance, production-ready open-source RLHF fr
 
 📚 **Learn More**: [Documentation](https://openrlhf.readthedocs.io/) | [Slides](https://docs.google.com/presentation/d/1JRhB1d7csofx0PIZBmfyBdMluxNd5JLPpUHrrvVhGnk/edit?usp=sharing) | [Technical Report](https://www.researchgate.net/publication/393414548_OpenRLHF_An_Easy-to-use_Scalable_and_High-performance_RLHF_Framework) | [Video](https://www.bilibili.com/video/BV1dv2jBxEQG/)
 
+> 🔥 **New Backend**: [**Molt**](https://github.com/NVIDIA-NeMo/labs-molt) brings an [Automodel](https://github.com/NVIDIA-NeMo/Automodel)-powered backend to OpenRLHF that's **more powerful than DeepSpeed** — scaling RL training to **hundreds of billions of parameters** while keeping the same familiar, elegant OpenRLHF workflow.
+
 ## 📖 Table of Contents
 
 - [🗞️ News](#news)
@@ -53,6 +55,7 @@ OpenRLHF is **the first** high-performance, production-ready open-source RLHF fr
 <details>
 <summary>Show News</summary>
 
+- [2026/9] OpenRLHF supports [FlashREINFORCE](https://www.alphaxiv.org/abs/2609.flashreinforce-asynchronous-rl-agentic-models) — critic-free, single-rollout asynchronous RL for agentic language models, as a composition of configs (`--algo.advantage.estimator flash_reinforce`, a binary-KL trust region on the vLLM logprobs, sample-mean aggregation). Training script: [train_flash_reinforce_ray_agent_async.sh](./examples/scripts/train_flash_reinforce_ray_agent_async.sh)
 - [2026/4] OpenRLHF 0.10 adds **Multi-Turn VLM RL** — multi-step interactions with images in both prompts and environment feedback (e.g. screenshots). Example: [vlm_multiturn_agent.py](./examples/python/vlm_multiturn_agent.py)
 - [2026/4] OpenRLHF 0.10 adds **VLM (Vision-Language Model) RLHF support** — train VLMs like Qwen3.5 with image inputs end-to-end. Training script: [train_vlm_math_hybrid_engine.sh](./examples/scripts/train_vlm_math_hybrid_engine.sh)
 - [2026/2] [ProRL V2](https://developer.nvidia.com/blog/scaling-llm-reinforcement-learning-with-prolonged-training-using-prorl-v2/) uses REINFORCE++-baseline to train a state-of-the-art 1.5B reasoning model with prolonged RL training. Training script: [train_prorlv2_math_hybrid_engine.sh](./examples/scripts/train_prorlv2_math_hybrid_engine.sh)
@@ -188,6 +191,7 @@ OpenRLHF implements **PPO, REINFORCE++, REINFORCE++-baseline, GRPO, RLOO** with 
 | **RLOO** | `rloo` | Per-token KL + PPO-clip | Multi-sample training |
 | **GRPO** | `group_norm` | Group normalization | Batch-based training |
 | **Dr. GRPO** | `dr_grpo` | Simplified GRPO | Removes local `/std` norm |
+| **FlashREINFORCE** | `flash_reinforce` | Critic-free single-rollout RL: batch-mean baseline, binary-KL trust region on the vLLM logprobs | Async agentic RL with one rollout per prompt ([script](examples/scripts/train_flash_reinforce_ray_agent_async.sh)) |
 
 </details>
 
@@ -297,7 +301,7 @@ sudo pip uninstall xgboost transformer_engine flash_attn pynvml -y
 
 # 3. Install OpenRLHF (choose one)
 pip install openrlhf                    # Basic
-pip install openrlhf[vllm]              # + vLLM 0.22.1 (recommended)
+pip install openrlhf[vllm]              # + vLLM 0.29.0 (recommended)
 pip install openrlhf[vllm_latest]       # + Latest vLLM
 pip install openrlhf[vllm,ring,liger]   # + All optimizations
 ```
@@ -311,7 +315,7 @@ pip install -e .
 ```
 
 > [!TIP]
-> We recommend **vLLM 0.22.1+** for best performance. See [Dockerfiles](./dockerfile/) and [Nvidia-Docker Install Script](./examples/scripts/nvidia_docker_install.sh).
+> We recommend **vLLM 0.29.0+** for best performance. See [Dockerfiles](./dockerfile/) and [Nvidia-Docker Install Script](./examples/scripts/nvidia_docker_install.sh).
 
 ### Prepare Datasets
 
@@ -491,15 +495,18 @@ ray job submit --address="http://127.0.0.1:8265" \
 # --algo.advantage.estimator reinforce_baseline  # REINFORCE++-baseline (best for RLVR)
 # --algo.advantage.estimator group_norm       # GRPO
 # --algo.advantage.estimator dr_grpo          # Dr. GRPO
+# --algo.advantage.estimator flash_reinforce  # FlashREINFORCE (single rollout: --rollout.n_samples_per_prompt 1)
 
 # Advanced Options:
 # --algo.kl.init_coef 0                                    # No reference model
 # --reward.remote_url http://host:5000/get_reward         # HTTP reward model
 # --rollout.n_samples_per_prompt 4                            # Multiple samples per prompt
 # --rollout.vllm_generate_batch_size 2048                     # Oversample at generation (> rollout_batch_size); requires --train.async_enable
-# --algo.advantage.is_correction_enable                         # vLLM importance sampling correction for off-policy rollouts
-# --algo.advantage.is_correction_type tis                       # Correction type: tis (token clamp) | icepop (token filter) | seq-mask-tis (seq-level geom mean)
-# --algo.advantage.is_correction_threshold 0.5 5.0               # IS truncation interval: [low, high]
+# --algo.advantage.is_correction_level token                    # vLLM importance sampling correction for off-policy rollouts: token | seq (per-sequence mean)
+# --algo.advantage.is_correction_mode mask                      # Out-of-band treatment: mask (ICEPOP / seq-mask-tis) | clip (TIS, token level only)
+# --algo.advantage.is_correction_gating ratio                   # Gated statistic: ratio (the IS weight) | binary_kl | tv (trust region on the sampled token)
+# --algo.advantage.is_correction_threshold 0.5 5.0              # [low, high] band on the gated statistic; a single value is an upper bound only
+# --actor.loss_agg_mode seq-mean-token-mean                     # Policy-loss aggregation: token-mean (default) | seq-mean-token-mean (every sequence weighs the same)
 # --ckpt.best_metric_key eval_default_pass1                # Save best checkpoint by eval metric (empty = auto-detect first pass1, 'none' = disable)
 # --actor.policy_loss_type gspo                             # Use GSPO policy loss variant (vs default 'ppo')
 ```
@@ -729,7 +736,7 @@ Pick the execution mode based on your priority — OpenRLHF gives you a clear tr
 |------|-------|-----------------|-------------|
 | **Hybrid Engine (colocated)** | `--train.colocate_all`<br>`--vllm.enable_sleep`<br>`--ds.enable_sleep` | **Most stable** — strictly on-policy, every rollout uses the latest weights. Serial generate→train cycle. | Research, sensitive RL algorithms, reproducibility, recipe validation |
 | **Async Training** | `--train.async_enable`<br>`--train.async_queue_size N` | **Highest throughput** — generation and training run in parallel. Tune off-policyness via `--train.async_queue_size` (larger = more off-policy). | Production throughput when convergence is already validated |
-| **Async + Partial Rollout** | `--train.async_enable`<br>`--train.partial_rollout_enable` | **Maximum overlap** — vLLM pause/resume instead of locking, in-flight samples may mix old/new weights. Most aggressive off-policy. | Pushing async throughput further; pair with `--algo.advantage.is_correction_enable` |
+| **Async + Partial Rollout** | `--train.async_enable`<br>`--train.partial_rollout_enable` | **Maximum overlap** — vLLM pause/resume instead of locking, in-flight samples may mix old/new weights. Most aggressive off-policy. | Pushing async throughput further; pair with `--algo.advantage.is_correction_level token` |
 
 #### ⚡ Other Speed Optimizations
 

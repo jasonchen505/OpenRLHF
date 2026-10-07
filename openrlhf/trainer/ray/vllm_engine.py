@@ -104,8 +104,6 @@ class RolloutRayActor:
 
             os.environ["RAY_ADDRESS"] = global_worker.gcs_client.address
 
-        os.environ["VLLM_USE_V1"] = "1"
-
     async def init_process_group(
         self, master_address, master_port, rank_offset, world_size, group_name, backend, use_ray
     ):
@@ -138,7 +136,7 @@ class RolloutRayActor:
     async def sleep(self, level=1):
         await self.llm.sleep(level=level)
 
-    async def wake_up(self, tags=["weights", "kv_cache"]):
+    async def wake_up(self, tags=None):
         """Wake up the engine from sleep mode.
 
         Args:
@@ -147,6 +145,8 @@ class RolloutRayActor:
                   Use ["kv_cache"] to wake up only KV cache (after weight sync).
                   Use None to wake up everything.
         """
+        if tags is None:
+            tags = ["weights", "kv_cache"]
         for tag in tags:
             await self.llm.wake_up(tags=[tag])
 

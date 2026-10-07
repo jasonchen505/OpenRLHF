@@ -211,7 +211,9 @@ class RewardModelTrainer(ABC):
             self._tensorboard.close()
 
     # logs/checkpoints/evaluate
-    def save_logs_and_checkpoints(self, args, global_step, step_bar, logs_dict={}, client_states={}):
+    def save_logs_and_checkpoints(self, args, global_step, step_bar, logs_dict=None, client_states=None):
+        logs_dict = logs_dict or {}
+        client_states = client_states or {}
         if global_step % args.logger.logging_steps == 0:
             # wandb
             if self._wandb is not None and self.strategy.is_rank_0():
@@ -253,6 +255,7 @@ class RewardModelTrainer(ABC):
             acc = 0
             rewards = []
             loss_sum = 0
+            num_samples = 0
             device = next(self.model.parameters()).device
             for data in eval_dataloader:
                 chosen_ids, c_mask, reject_ids, r_mask, margin = data
@@ -273,12 +276,14 @@ class RewardModelTrainer(ABC):
                 loss = self.loss_fn(chosen_reward, reject_reward, margin)
 
                 rewards += [chosen_reward.flatten(), reject_reward.flatten()]
-                acc += (chosen_reward > reject_reward).float().mean().item()
-                loss_sum += loss.item()
+                batch_size = chosen_reward.numel()
+                acc += (chosen_reward > reject_reward).sum().item()
+                loss_sum += loss.item() * batch_size
+                num_samples += batch_size
                 step_bar.update()
 
-            acc_mean = acc / eval_dataloader.__len__()
-            loss_mean = loss_sum / eval_dataloader.__len__()
+            acc_mean = acc / num_samples
+            loss_mean = loss_sum / num_samples
 
             rewards = torch.cat(rewards).float()
             rewards = self.strategy.all_gather(rewards)

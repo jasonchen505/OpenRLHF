@@ -77,14 +77,12 @@ class ActorPPOTrainer(ABC):
             clip_eps_low=self.args.actor.eps_clip_low_high[0],
             clip_eps_high=self.args.actor.eps_clip_low_high[1],
             dual_clip=self.args.actor.dual_clip,
+            token_level_loss=self.args.actor.loss_agg_mode == "token-mean",
             policy_loss_type=self.args.actor.policy_loss_type,
-            enable_vllm_is_correction=self.args.algo.advantage.is_correction_enable,
-            vllm_is_truncated_threshold=(
-                self.args.algo.advantage.is_correction_threshold
-                if self.args.algo.advantage.is_correction_enable
-                else None
-            ),
-            vllm_is_correction_type=self.args.algo.advantage.is_correction_type,
+            is_correction_level=self.args.algo.advantage.is_correction_level,
+            is_correction_mode=self.args.algo.advantage.is_correction_mode,
+            is_correction_gating=self.args.algo.advantage.is_correction_gating,
+            is_correction_threshold=self.args.algo.advantage.is_correction_threshold,
         )
 
         # Mixtral 8x7b
@@ -303,7 +301,7 @@ class ActorPPOTrainer(ABC):
         )
 
         # loss function
-        actor_loss, clip_ratio, ppo_kl, vllm_kl = self.actor_loss_fn(
+        actor_loss, clip_ratio, ppo_kl, vllm_kl, is_filter_ratio = self.actor_loss_fn(
             action_log_probs,
             old_action_log_probs,
             advantages,
@@ -315,13 +313,16 @@ class ActorPPOTrainer(ABC):
         experience.info["ppo_kl"] = ppo_kl.detach()
         if vllm_kl is not None:
             experience.info["vllm_kl"] = vllm_kl.detach()
+            experience.info["is_filter_ratio"] = is_filter_ratio.detach()
 
         if self.args.algo.kl.use_loss:
             if self.args.algo.kl.init_coef > 0:
                 kl = compute_approx_kl(
                     action_log_probs,
                     base_action_log_probs,
+                    log_probs_old=old_action_log_probs,
                     kl_estimator=self.args.algo.kl.estimator,
+                    unbiased_gradient=self.args.algo.kl.unbiased_gradient,
                 )
                 logprobs_diff = action_log_probs.float() - base_action_log_probs.float()
             else:
@@ -519,7 +520,7 @@ class PolicyModelActor(BaseModelActor):
             lora_alpha=strategy.args.ds.lora.alpha,
             target_modules=strategy.args.ds.lora.target_modules,
             lora_dropout=strategy.args.ds.lora.dropout,
-            ds_config=strategy.get_ds_train_config(is_actor=True),
+            ds_config=strategy.get_ds_train_config(),
             packing_samples=strategy.args.ds.packing_samples,
             temperature=strategy.args.rollout.temperature,
             use_liger_kernel=strategy.args.ds.use_liger_kernel,

@@ -6,9 +6,7 @@ from torch.utils.data import Dataset
 from openrlhf.utils.utils import zero_pad_sequences
 
 
-def preprocess_data(
-    data, input_template=None, input_key="input", output_key=None, apply_chat_template=None, multiturn=False
-):
+def preprocess_data(data, input_template=None, input_key="input", output_key=None, apply_chat_template=None):
     if apply_chat_template:
         if output_key:
             prompt_message = data[input_key]
@@ -140,7 +138,6 @@ class SFTDataset(Dataset):
             self.input_key,
             self.output_key,
             apply_chat_template=None if self.pretrain_mode else self.apply_chat_template,
-            multiturn=self.multiturn,
         )
 
         if not self.pretrain_mode:
@@ -201,7 +198,10 @@ class SFTDataset(Dataset):
 
     def get_loss_mask(self, input_ids, idx):
         if self.pretrain_mode:
-            return torch.ones_like(input_ids, dtype=torch.float32)  # shape:[1, seq_len]
+            loss_mask = torch.ones_like(input_ids, dtype=torch.float32)
+            # The terminal logit has no next token, even when other samples are longer.
+            loss_mask[:, -1:] = 0
+            return loss_mask
 
         loss_mask = torch.zeros_like(input_ids, dtype=torch.float32)
         if not self.multiturn:
